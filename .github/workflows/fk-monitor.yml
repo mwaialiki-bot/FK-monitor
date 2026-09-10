@@ -1,0 +1,81 @@
+name: FKVT监测（每小时）
+
+on:
+  schedule:
+    # 每小时 UTC 整点运行 → 即北京时间整点（UTC+8）。覆盖全天 24 小时。
+    - cron: "0 * * * *"
+  # 允许在 Actions 页面手动点一下立即运行，方便测试
+  workflow_dispatch:
+
+# 允许 workflow 把生成的数据提交回仓库
+permissions:
+  contents: write
+
+env:
+  # 若手动升级 Playwright 大版本导致浏览器不兼容，把这里改成 "2" 即可强制刷新缓存
+  PW_VERSION: "1"
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取仓库代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 缓存 Playwright 浏览器（~150MB）。首次下载后，后续运行直接命中缓存，
+      # 把每次 2~3 分钟压缩到约 30 秒，私库也不会超 2000 分钟额度。
+      - name: 缓存 Playwright 浏览器
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ env.PW_VERSION }}
+
+      - name: 安装 Playwright 与 Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: 运行抓取脚本（每小时一次）
+        run: python fk_headless_scraper.py
+
+      - name: 把新数据提交回仓库
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add fk_vote_history.csv fk_snapshots.json fk_timeline.html fk_data_table.html 2>/dev/null || true
+          git commit -m "chore: 每小时VT快照 $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "无变化，跳过提交"
+          git push
+
+      # 把图表 + 数据表 + 原始 CSV 整理成 GitHub Pages 站点产物
+      - name: 准备 GitHub Pages 产物
+        run: |
+          mkdir -p public
+          cp fk_timeline.html    public/index.html
+          cp fk_data_table.html  public/data.html
+          cp fk_vote_history.csv public/fk_vote_history.csv
+
+      - name: 上传 Pages 产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  # 部署到 GitHub Pages，地址形如 https://<用户名>.github.io/<仓库名>/
+  deploy:
+    needs: monitor
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
